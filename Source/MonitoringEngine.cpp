@@ -40,7 +40,7 @@ static Expression evaluate(Expression&& e) {
       logString << "</pre></body></html>";
       return new BOSSExpression(logString.str());
     };
-  } >= Recurse(logAndReturn);
+  } < AnyHead >= Recurse(logAndReturn);
 }
 
 extern "C" BOSSExpression* evaluate(BOSSExpression* e) {
