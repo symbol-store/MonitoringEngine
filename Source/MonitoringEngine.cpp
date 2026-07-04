@@ -13,16 +13,16 @@ using boss::Symbol;
 using namespace boss::utilities::experimental::sentinel;
 using namespace boss::utilities::experimental;
 
-template<bool isRoot>
-static Expression evaluate(Expression&& e) {
+template <bool isRoot> static Expression evaluate(Expression&& e) {
   static auto log = std::vector<Expression>();
   if(isRoot)
     log.push_back(e.clone(boss::expressions::CloneReason::FOR_TESTING));
   return std::move(e)<"GetEntryPoint"_(Symbol_) >= Recurse(evaluate<false>)>[](auto, auto dynamics,
-                                                                        auto) -> Expression {
+                                                                               auto) -> Expression {
     static auto mode = std::get<Symbol>(dynamics[0]);
     return (long long)+[](BOSSExpression* e) -> BOSSExpression* {
-      auto logString = std::stringstream(R"(<!DOCTYPE html>
+      auto logString = std::stringstream();
+      logString << R"(<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -33,7 +33,7 @@ static Expression evaluate(Expression&& e) {
   <p>The MonitoringEngine is up. The MonitoringEngine is running. The MonitoringEngine has checked that the MonitoringEngine is up and running, and reports the following finding: it is.</p>
         <p>This page was hand-delivered to you by a process which is, as previously mentioned, completely fine. Should that change, this page will of course be the first to know &mdash; and the last to admit it.</p>
         <pre>
-        )");
+        )";
       for(auto& it : log)
         logString << it << std::endl;
       logString << "</pre></body></html>";
