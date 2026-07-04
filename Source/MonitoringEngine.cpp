@@ -13,12 +13,10 @@ using boss::Symbol;
 using namespace boss::utilities::experimental::sentinel;
 using namespace boss::utilities::experimental;
 
-static Expression evaluate(Expression&& e) {
+static Expression evaluate(Expression&& e, bool isRoot = false) {
   static auto log = std::vector<Expression>();
-  auto logAndReturn = [](Expression&& e) -> Expression {
+  if(isRoot)
     log.push_back(e.clone(boss::expressions::CloneReason::FOR_TESTING));
-    return e;
-  };
   return std::move(e)<"GetEntryPoint"_(Symbol_) >= Recurse(evaluate)>[](auto, auto dynamics,
                                                                         auto) -> Expression {
     static auto mode = std::get<Symbol>(dynamics[0]);
@@ -40,9 +38,9 @@ static Expression evaluate(Expression&& e) {
       logString << "</pre></body></html>";
       return new BOSSExpression(logString.str());
     };
-  } < AnyHead >= Recurse(logAndReturn);
+  };
 }
 
 extern "C" BOSSExpression* evaluate(BOSSExpression* e) {
-  return new BOSSExpression {.delegate = evaluate(std::move(e->delegate))};
+  return new BOSSExpression {.delegate = evaluate(std::move(e->delegate), true)};
 };
