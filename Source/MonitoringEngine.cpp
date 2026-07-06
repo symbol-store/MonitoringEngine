@@ -15,10 +15,7 @@ using namespace boss::utilities::experimental;
 
 template <bool isRoot> static Expression evaluate(Expression&& e) {
   static auto log = std::vector<Expression>();
-  if(isRoot)
-    log.push_back(e.clone(boss::expressions::CloneReason::FOR_TESTING));
-  return std::move(e)<"GetEntryPoint"_(Symbol_) >= Recurse(evaluate<false>)>[](auto, auto dynamics,
-                                                                               auto) -> Expression {
+  return std::move(e) < "GetEntryPoint"_(Symbol_) >= [](auto, auto dynamics, auto) -> Expression {
     static auto mode = std::get<Symbol>(dynamics[0]);
     return (long long)+[](BOSSExpression* e) -> BOSSExpression* {
       auto logString = std::stringstream();
@@ -30,15 +27,18 @@ template <bool isRoot> static Expression evaluate(Expression&& e) {
 </head>
 <body>
   <h1>Everything is fine.</h1>
-  <p>The MonitoringEngine is up. The MonitoringEngine is running. The MonitoringEngine has checked that the MonitoringEngine is up and running, and reports the following finding: it is.</p>
-        <p>This page was hand-delivered to you by a process which is, as previously mentioned, completely fine. Should that change, this page will of course be the first to know &mdash; and the last to admit it.</p>
         <pre>
-        )";
+)";
       for(auto& it : log)
         logString << it << std::endl;
       logString << "</pre></body></html>";
       return new BOSSExpression(logString.str());
     };
+  } < Any_ >= [](Symbol&& head, auto&& statics, auto&& dynamics, auto&& spans) {
+    auto result =
+        ComplexExpression(head, std::move(statics), std::move(dynamics), std::move(spans));
+    log.push_back(result.clone(boss::expressions::CloneReason::FOR_TESTING));
+    return std::move(result);
   };
 }
 
