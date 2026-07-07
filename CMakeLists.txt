@@ -49,7 +49,20 @@ if(MSVC)
 else()
   set(LibraryType MODULE)
 endif(MSVC)
-add_library(MonitoringEngine ${LibraryType} Source/MonitoringEngine.cpp)
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/index_html.cpp"
+    COMMAND ${CMAKE_COMMAND}
+        -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/Source/index.html
+        -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/index_html.cpp
+        -DSYMBOL=indexHtml
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_file.cmake
+    DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/Source/index.html
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_file.cmake
+    VERBATIM)
+add_library(MonitoringEngine ${LibraryType}
+  Source/MonitoringEngine.cpp
+  ${CMAKE_CURRENT_BINARY_DIR}/index_html.cpp)
 
 set_property(TARGET MonitoringEngine PROPERTY CXX_STANDARD 23)
 if(MSVC)
