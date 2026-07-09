@@ -2,8 +2,12 @@
 #include <Expression.hpp>
 #include <ExpressionUtilities.hpp>
 #include <Utilities.hpp>
+#include <chrono>
+#include <condition_variable>
 #include <deque>
+#include <semaphore>
 #include <sstream>
+#include <thread>
 
 using std::string_literals::operator""s;
 using boss::utilities::operator""_;
@@ -17,26 +21,66 @@ using namespace boss::utilities::experimental;
 extern const char indexHtml[];
 
 static Expression evaluate(Expression&& e) {
-  static auto log = std::deque<Expression>();
+  static struct {
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::deque<std::pair<std::reference_wrapper<Expression>,
+                         std::reference_wrapper<std::binary_semaphore>>>
+        log;
+    void emplace_back(std::reference_wrapper<Expression> e,
+                      std::reference_wrapper<std::binary_semaphore> b) {
+      {
+        std::lock_guard guard(mutex);
+        log.emplace_back(e, b);
+      }
+      condition.notify_one();
+    }
+    std::pair<std::reference_wrapper<Expression>, std::reference_wrapper<std::binary_semaphore>>
+    wait_and_pop_front() {
+      std::unique_lock lock(mutex);
+      condition.wait(lock, [this] { return !log.empty(); });
+      auto result = std::move(log.front());
+      log.pop_front();
+      return result;
+    }
+
+    std::reference_wrapper<Expression> wait_and_front_expression() {
+      std::unique_lock lock(mutex);
+      condition.wait(lock, [this] { return !log.empty(); });
+      auto result = log.front().first;
+      return result;
+    }
+  } log;
   return std::move(e) < "GetEntryPoint"_(Symbol_) >= [](auto, auto dynamics, auto) -> Expression {
     static auto mode = std::get<Symbol>(dynamics[0]);
     return (long long)+[](BOSSExpression* e) -> BOSSExpression* {
-      if(get<Symbol>(e->delegate).getName() == "index") {
-        return new BOSSExpression(indexHtml);
-      }
-      auto logString = std::stringstream();
-      for(auto& it : log)
-        logString << boss::pretty << it << std::endl;
-      if(log.empty())
-        logString << ";; no pending queries" << std::endl;
-      return new BOSSExpression(logString.str());
+      auto result = std::stringstream();
+      std::map<std::string, std::function<void()>>(
+          {{"index", [&] { result << indexHtml; }},
+           {"approve",
+            [&] {
+              auto [expression, blocked] = log.wait_and_pop_front();
+              blocked.get().release();
+              result << boss::pretty << log.wait_and_front_expression() << std::endl;
+            }},
+           {"reject",
+            [&] {
+              auto [expression, blocked] = log.wait_and_pop_front();
+              expression.get() = "RejectedByUser"_();
+              blocked.get().release();
+              result << boss::pretty << log.wait_and_front_expression() << std::endl;
+            }},
+           {"refresh",
+            [&] { result << boss::pretty << log.wait_and_front_expression() << std::endl; }}})
+          .at(get<Symbol>(e->delegate).getName())();
+      return new BOSSExpression(result.str());
     };
   } < Any_ >= [](Symbol&& head, auto&& statics, auto&& dynamics, auto&& spans) {
-    auto result =
-        ComplexExpression(head, std::move(statics), std::move(dynamics), std::move(spans));
-    if(log.size() > 10)
-      log.pop_back();
-    log.push_front(result.clone(boss::expressions::CloneReason::FOR_TESTING));
+    auto result = Expression(
+        ComplexExpression(head, std::move(statics), std::move(dynamics), std::move(spans)));
+    std::binary_semaphore signal {0};
+    log.emplace_back(result, signal);
+    signal.acquire();
     return std::move(result);
   };
 }

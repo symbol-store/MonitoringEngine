@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <meta charset="utf-8">
 <button id="refresh">Refresh</button>
+<button id="approve">Approve</button>
+<button id="reject">Reject</button>
 <script type="importmap">
 {
   "imports": {
@@ -72,8 +74,8 @@ function setDoc(text) {
   view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
 }
 
-async function loadCode() {
-  const SOURCE = "/EvaluateInEngines/List/Monitoring/:/report/////text";
+async function loadCode(suffix = "refresh") {
+  const SOURCE = "/EvaluateInEngines/List/Monitoring/:/report/////" + suffix;
   setDoc(";; loading…");
   try {
 
@@ -86,6 +88,8 @@ async function loadCode() {
   }
 }
 
-document.getElementById("refresh").addEventListener("click", loadCode);
+document.getElementById("refresh").addEventListener("click", () => loadCode("refresh"));
+document.getElementById("approve").addEventListener("click", () => loadCode("approve"));
+document.getElementById("reject").addEventListener("click", () => loadCode("reject"));
 loadCode();
 </script>
