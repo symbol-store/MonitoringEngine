@@ -2,18 +2,14 @@
 #include <Expression.hpp>
 #include <ExpressionUtilities.hpp>
 #include <Utilities.hpp>
-#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <semaphore>
 #include <sstream>
-#include <thread>
 
-using std::string_literals::operator""s;
 using boss::utilities::operator""_;
 using boss::ComplexExpression;
 using boss::Expression;
-using boss::Span;
 using boss::Symbol;
 using namespace boss::utilities::experimental::sentinel;
 using namespace boss::utilities::experimental;
@@ -51,7 +47,9 @@ static Expression evaluate(Expression&& e) {
       return result;
     }
   } log;
-  return std::move(e) < "GetEntryPoint"_(Symbol_) >= [](auto, auto dynamics, auto) -> Expression {
+  return std::move(e) < "GetEntryPoint"_(Symbol_) >=
+             [](auto, auto dynamics,
+                auto) -> Expression {
     static auto mode = std::get<Symbol>(dynamics[0]);
     return (long long)+[](BOSSExpression* e) -> BOSSExpression* {
       auto result = std::stringstream();
@@ -75,14 +73,22 @@ static Expression evaluate(Expression&& e) {
           .at(get<Symbol>(e->delegate).getName())();
       return new BOSSExpression(result.str());
     };
-  } < Any_ >= [](Symbol&& head, auto&& statics, auto&& dynamics, auto&& spans) {
-    auto result = Expression(
-        ComplexExpression(head, std::move(statics), std::move(dynamics), std::move(spans)));
-    std::binary_semaphore signal {0};
-    log.emplace_back(result, signal);
-    signal.acquire();
-    return std::move(result);
-  };
+  } < Any_ >= boss::utilities::overload( //
+                             [&](Expression&& result) {
+                               std::binary_semaphore signal {0};
+                               log.emplace_back(result, signal);
+                               signal.acquire();
+                               return std::move(result);
+                             },
+                             [&](auto&&... args) {
+                               auto result = Expression(ComplexExpression(std::move(args)...));
+                               std::binary_semaphore signal {0};
+                               log.emplace_back(result, signal);
+                               signal.acquire();
+                               return std::move(result);
+                             }
+
+              );
 }
 
 extern "C" BOSSExpression* evaluate(BOSSExpression* e) {
