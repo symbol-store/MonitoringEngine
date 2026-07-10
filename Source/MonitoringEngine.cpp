@@ -3,8 +3,8 @@
 #include <ExpressionUtilities.hpp>
 #include <Utilities.hpp>
 #include <condition_variable>
-#include <fstream>
 #include <deque>
+#include <fstream>
 #include <semaphore>
 #include <sstream>
 
@@ -53,30 +53,25 @@ static Expression evaluate(Expression&& e) {
                 auto) -> Expression {
     static auto mode = std::get<Symbol>(dynamics[0]);
     return (long long)+[](BOSSExpression* e) -> BOSSExpression* {
-      auto result = std::stringstream();
-      std::map<std::string, std::function<void()>>(
-          {{"index",
-            [&] {
-              auto f = std::ifstream("index.html");
-              f ? result << f.rdbuf() : result << indexHtml;
-            }},
-           {"approve",
-            [&] {
-              auto [expression, blocked] = log.wait_and_pop_front();
-              blocked.get().release();
-              result << boss::pretty << log.wait_and_front_expression() << std::endl;
-            }},
-           {"reject",
-            [&] {
-              auto [expression, blocked] = log.wait_and_pop_front();
-              expression.get() = "RejectedByUser"_();
-              blocked.get().release();
-              result << boss::pretty << log.wait_and_front_expression() << std::endl;
-            }},
-           {"refresh",
-            [&] { result << boss::pretty << log.wait_and_front_expression() << std::endl; }}})
-          .at(get<Symbol>(e->delegate).getName())();
-      return new BOSSExpression(result.str());
+      return new BOSSExpression(
+          (std::stringstream() << Expression(
+               std::move(e->delegate) < ""_() >= [&](auto&&...) -> Expression {
+                 return ""_;
+               } < "approve"_ >= [&](auto&&...) -> Expression {
+                 log.wait_and_pop_front().second.get().release();
+                 return std::move(log.wait_and_front_expression().get());
+               } < "reject"_ >= [&](auto&&...) -> Expression {
+                 auto [expression, blocked] = log.wait_and_pop_front();
+                 expression.get() = "RejectedByUser"_();
+                 blocked.get().release();
+                 return std::move(log.wait_and_front_expression().get());
+               } < "index"_ >= [&](auto&&...) -> Expression {
+                 auto f = std::ifstream("index.html");
+                 return f ? (std::stringstream() << f.rdbuf()).str() : indexHtml;
+               } < "refresh"_ >= [&](auto&&...) -> Expression {
+                 return std::move(log.wait_and_front_expression().get());
+               }))
+              .str());
     };
   } < Any_ >= boss::utilities::overload( //
                              [&](Expression&& result) {
