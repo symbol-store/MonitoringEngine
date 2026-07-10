@@ -3,6 +3,7 @@
 #include <ExpressionUtilities.hpp>
 #include <Utilities.hpp>
 #include <condition_variable>
+#include <fstream>
 #include <deque>
 #include <semaphore>
 #include <sstream>
@@ -54,7 +55,11 @@ static Expression evaluate(Expression&& e) {
     return (long long)+[](BOSSExpression* e) -> BOSSExpression* {
       auto result = std::stringstream();
       std::map<std::string, std::function<void()>>(
-          {{"index", [&] { result << indexHtml; }},
+          {{"index",
+            [&] {
+              auto f = std::ifstream("index.html");
+              f ? result << f.rdbuf() : result << indexHtml;
+            }},
            {"approve",
             [&] {
               auto [expression, blocked] = log.wait_and_pop_front();
