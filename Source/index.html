@@ -1,8 +1,19 @@
 <!DOCTYPE html>
 <meta charset="utf-8">
+<style>
+  #cols { display: flex; gap: 1rem; }
+  #cols > div { flex: 1; min-width: 0; }
+</style>
 <button id="refresh">Refresh</button>
 <button id="approve">Approve</button>
 <button id="reject">Reject</button>
+<button id="evaluate" disabled>Evaluate</button>
+<label><input type="checkbox" id="pretty" checked> pretty-print</label>
+<div id="cols">
+  <div id="query"></div>
+  <div id="result"></div>
+</div>
+<script src="boss.js"></script>
 <script type="importmap">
 {
   "imports": {
@@ -55,41 +66,67 @@ const lispFold = foldService.of((state, lineStart, lineEnd) => {
   return null;
 });
 
-const view = new EditorView({
-  state: EditorState.create({
-    doc: ";; loading…",
-    extensions: [
-      foldGutter({ openText: "▾", closedText: "▸" }),
-      StreamLanguage.define(commonLisp),
-      syntaxHighlighting(defaultHighlightStyle),
-      lispFold,
-      EditorState.readOnly.of(true),
-      EditorView.editable.of(false),
-    ],
-  }),
-  parent: document.body,
-});
+function makeEditor(parent) {
+  return new EditorView({
+    state: EditorState.create({
+      doc: "",
+      extensions: [
+        foldGutter({ openText: "▾", closedText: "▸" }),
+        StreamLanguage.define(commonLisp),
+        syntaxHighlighting(defaultHighlightStyle),
+        lispFold,
+        EditorState.readOnly.of(true),
+        EditorView.editable.of(false),
+      ],
+    }),
+    parent,
+  });
+}
 
-function setDoc(text) {
+const queryView = makeEditor(document.getElementById("query"));
+const resultView = makeEditor(document.getElementById("result"));
+
+function setDoc(view, text) {
   view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
 }
 
 async function loadCode(suffix = "refresh") {
   const SOURCE = "/EvaluateInEngines/List/Monitoring/:/report/////" + suffix;
-  setDoc(";; loading…");
+  setDoc(queryView, ";; loading…");
   try {
 
   
     const res = await fetch(SOURCE, { cache: "no-store" });
     if (!res.ok) throw new Error(res.status + " " + res.statusText);
-    setDoc(await res.text());
+    setDoc(queryView, await res.text());
   } catch (e) {
-    setDoc(";; failed to load " + SOURCE + "\n;; " + e);
+    setDoc(queryView, ";; failed to load " + SOURCE + "\n;; " + e);
   }
 }
+
+let boss = null;
+setDoc(resultView, ";; loading WebAssembly module…");
+createBOSS({
+  // The module tree is preloaded at /chibi and the context chdir()s there in
+  // C++ before init (see BOSSWasm.cpp), so no preRun setup is needed here.
+}).then(function (module) {
+  boss = module;
+  document.getElementById("evaluate").disabled = false;
+  setDoc(resultView, ";; ready.");
+}).catch(function (e) {
+  setDoc(resultView, ";; failed to load: " + e);
+});
 
 document.getElementById("refresh").addEventListener("click", () => loadCode("refresh"));
 document.getElementById("approve").addEventListener("click", () => loadCode("approve"));
 document.getElementById("reject").addEventListener("click", () => loadCode("reject"));
+document.getElementById("evaluate").addEventListener("click", () => {
+  if (boss === null) return;
+  const expr = queryView.state.doc.toString();
+  const pretty = document.getElementById("pretty").checked;
+  const result = boss.evaluate(expr, pretty);
+  setDoc(resultView, result.isError ? ";; error:\n" + result.text : result.text);
+});
+
 loadCode();
 </script>
