@@ -2,6 +2,7 @@
 #include <Expression.hpp>
 #include <ExpressionUtilities.hpp>
 #include <Utilities.hpp>
+#include <algorithm>
 #include <condition_variable>
 #include <deque>
 #include <fstream>
@@ -14,6 +15,7 @@ using boss::Expression;
 using boss::Symbol;
 using namespace boss::utilities::experimental::sentinel;
 using namespace boss::utilities::experimental;
+using boss::utilities::overload;
 
 extern const char indexHtml[];
 
@@ -53,25 +55,46 @@ static Expression evaluate(Expression&& e) {
                 auto) -> Expression {
     static auto mode = std::get<Symbol>(dynamics[0]);
     return (long long)+[](BOSSExpression* e) -> BOSSExpression* {
-      return new BOSSExpression(
-          (std::stringstream() << Expression(
-               std::move(e->delegate) < ""_() >= [&](auto&&...) -> Expression {
-                 return ""_;
-               } < "approve"_ >= [&](auto&&...) -> Expression {
-                 log.wait_and_pop_front().second.get().release();
-                 return std::move(log.wait_and_front_expression().get());
-               } < "reject"_ >= [&](auto&&...) -> Expression {
-                 auto [expression, blocked] = log.wait_and_pop_front();
-                 expression.get() = "RejectedByUser"_();
-                 blocked.get().release();
-                 return std::move(log.wait_and_front_expression().get());
-               } < "index"_ >= [&](auto&&...) -> Expression {
-                 auto f = std::ifstream("index.html");
-                 return f ? (std::stringstream() << f.rdbuf()).str() : indexHtml;
-               } < "refresh"_ >= [&](auto&&...) -> Expression {
-                 return std::move(log.wait_and_front_expression().get());
-               }))
-              .str());
+      using ss = std::stringstream;
+      using namespace boss::expressions;
+      return new BOSSExpression(Expression(
+          std::move(e->delegate) < ""_() >= [&](auto&&...) -> Expression {
+            return ""_;
+          } < "approve"_ >= [&](auto&&...) -> Expression {
+            log.wait_and_pop_front().second.get().release();
+            return (ss() << boss::pretty << std::move(log.wait_and_front_expression().get())).str();
+          } < "reject"_ >= [&](auto&&...) -> Expression {
+            auto [expression, blocked] = log.wait_and_pop_front();
+            expression.get() = "RejectedByUser"_();
+            blocked.get().release();
+            return (ss() << boss::pretty << std::move(log.wait_and_front_expression().get())).str();
+          } < "refresh"_ >= [&](auto&&...) -> Expression {
+            return (ss() << boss::pretty << std::move(log.wait_and_front_expression().get())).str();
+          } < "index"_ >= [&](auto&&...) -> Expression {
+            return indexHtml; //
+          } < Symbol_ >= [](auto&&... args) -> Expression {
+            return std::invoke(
+                overload(
+                    [](Expression&& matched) -> Expression {
+                      auto const& name = std::get<Symbol>(matched).getName();
+                      if(auto f = std::ifstream(name, std::ios::binary | std::ios::ate)) {
+                        const std::streamsize size = f.tellg();
+                        f.seekg(0, std::ios::beg);
+                        auto data = std::vector<int8_t>(size);
+                        f.read(reinterpret_cast<char*>(data.data()), size);
+                        if(std::find(data.begin(), data.end(), int8_t {0}) == data.end())
+                          return std::string(data.begin(), data.end());
+                        else {
+                          auto spans = ExpressionSpanArguments {};
+                          spans.emplace_back(atoms::Span<int8_t>(std::move(data)));
+                          return ComplexExpression("Binary"_, {}, {}, std::move(spans));
+                        }
+                      }
+                      return "CouldNotOpenFile"_(std::move(matched));
+                    },
+                    [](auto&&... s) -> Expression { return "UnsupportedOperation"_(); }),
+                std::move(args)...);
+          }));
     };
   } < Any_ >= boss::utilities::overload( //
                              [&](Expression&& result) {
