@@ -8,6 +8,7 @@
 #include <fstream>
 #include <semaphore>
 #include <sstream>
+#include <zlib.h>
 
 using boss::utilities::operator""_;
 using boss::ComplexExpression;
@@ -18,6 +19,45 @@ using namespace boss::utilities::experimental;
 using boss::utilities::overload;
 
 extern const char indexHtml[];
+extern const unsigned char bossJs[];
+extern const unsigned long bossJs_len, bossJs_rawlen;
+extern const unsigned char bossWasm[];
+extern const unsigned long bossWasm_len, bossWasm_rawlen;
+extern const unsigned char bossData[];
+extern const unsigned long bossData_len, bossData_rawlen;
+
+namespace {
+std::vector<int8_t> inflateGz(unsigned char const* d, unsigned long n, unsigned long raw) {
+  auto out = std::vector<int8_t>(raw);
+  z_stream zs {};
+  if(inflateInit2(&zs, 15 + 32) != Z_OK) // 15+32: auto-detect the gzip header
+    return {};
+  zs.next_in = const_cast<Bytef*>(d);
+  zs.avail_in = n;
+  zs.next_out = reinterpret_cast<Bytef*>(out.data());
+  zs.avail_out = raw;
+  auto rc = inflate(&zs, Z_FINISH);
+  inflateEnd(&zs);
+  out.resize(rc == Z_STREAM_END ? zs.total_out : 0);
+  return out;
+}
+
+std::vector<int8_t>& bossWasmBytes() {
+  static auto bytes = inflateGz(bossWasm, bossWasm_len, bossWasm_rawlen);
+  return bytes;
+}
+std::vector<int8_t>& bossDataBytes() {
+  static auto bytes = inflateGz(bossData, bossData_len, bossData_rawlen);
+  return bytes;
+}
+std::string& bossJsText() {
+  static auto text = [] {
+    auto v = inflateGz(bossJs, bossJs_len, bossJs_rawlen);
+    return std::string(v.begin(), v.end());
+  }();
+  return text;
+}
+} // namespace
 
 static Expression evaluate(Expression&& e) {
   static struct {
@@ -57,6 +97,11 @@ static Expression evaluate(Expression&& e) {
     return (long long)+[](BOSSExpression* e) -> BOSSExpression* {
       using ss = std::stringstream;
       using namespace boss::expressions;
+      auto binarySpan = [](std::vector<int8_t>& data) -> Expression {
+        auto spans = ExpressionSpanArguments {};
+        spans.emplace_back(atoms::Span<int8_t>(data.data(), data.size(), {})); // non-owning view
+        return ComplexExpression("Binary"_, {}, {}, std::move(spans));
+      };
       return new BOSSExpression(Expression(
           std::move(e->delegate) < ""_() >= [&](auto&&...) -> Expression {
             return ""_;
@@ -72,6 +117,12 @@ static Expression evaluate(Expression&& e) {
             return (ss() << boss::pretty << std::move(log.wait_and_front_expression().get())).str();
           } < "index"_ >= [&](auto&&...) -> Expression {
             return indexHtml; //
+          } < "boss.js"_ >= [&](auto&&...) -> Expression {
+            return bossJsText(); //
+          } < "boss.wasm"_ >= [&](auto&&...) -> Expression {
+            return binarySpan(bossWasmBytes()); //
+          } < "boss.data"_ >= [&](auto&&...) -> Expression {
+            return binarySpan(bossDataBytes()); //
           } < Symbol_ >= [](auto&&... args) -> Expression {
             return std::invoke(
                 overload(

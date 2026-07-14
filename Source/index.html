@@ -117,9 +117,8 @@ createBOSS({
   setDoc(resultView, ";; failed to load: " + e);
 });
 
-document.getElementById("refresh").addEventListener("click", () => loadCode("refresh"));
-document.getElementById("approve").addEventListener("click", () => loadCode("approve"));
-document.getElementById("reject").addEventListener("click", () => loadCode("reject"));
+for (const action of ["refresh", "approve", "reject"])
+  document.getElementById(action).addEventListener("click", () => loadCode(action));
 document.getElementById("evaluate").addEventListener("click", () => {
   if (boss === null) return;
   const expr = queryView.state.doc.toString();
