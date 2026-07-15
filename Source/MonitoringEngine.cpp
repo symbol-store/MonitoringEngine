@@ -110,7 +110,12 @@ static Expression evaluate(Expression&& e) {
             return (ss() << boss::pretty << std::move(log.wait_and_front_expression().get())).str();
           } < "reject"_ >= [&](auto&&...) -> Expression {
             auto [expression, blocked] = log.wait_and_pop_front();
-            expression.get() = "RejectedByUser"_();
+            expression.get() = "RejectedByUserWithoutGivenReason"_();
+            blocked.get().release();
+            return (ss() << boss::pretty << std::move(log.wait_and_front_expression().get())).str();
+          } < "RejectedByUserWithReason"_(String_) >= [&](auto, auto dynamics, auto) -> Expression {
+            auto [expression, blocked] = log.wait_and_pop_front();
+            expression.get() = "RejectedByUserWithReason"_(get<std::string>(dynamics[0]));
             blocked.get().release();
             return (ss() << boss::pretty << std::move(log.wait_and_front_expression().get())).str();
           } < "refresh"_ >= [&](auto&&...) -> Expression {

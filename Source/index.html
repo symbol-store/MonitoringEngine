@@ -3,15 +3,29 @@
 <style>
   #cols { display: flex; gap: 1rem; }
   #cols > div { flex: 1; min-width: 0; }
+  #reject-overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.4); }
+  #reject-overlay[hidden] { display: none; }
+  #reject-dialog { display: flex; flex-direction: column; gap: 0.5rem; min-width: 22rem; padding: 1rem; background: #fff; border-radius: 6px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3); }
+  #reject-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
 </style>
 <button id="refresh">Refresh</button>
 <button id="approve">Approve</button>
 <button id="reject">Reject</button>
-<button id="evaluate" disabled>Evaluate</button>
-<label><input type="checkbox" id="pretty" checked> pretty-print</label>
+<button id="evaluate" disabled hidden>Evaluate</button>
+<label hidden><input type="checkbox" id="pretty" checked> pretty-print</label>
 <div id="cols">
   <div id="query"></div>
-  <div id="result"></div>
+  <div id="result" hidden></div>
+</div>
+<div id="reject-overlay" hidden>
+  <form id="reject-dialog">
+    <label for="reject-reason">Reason for rejecting this query (optional):</label>
+    <textarea id="reject-reason" rows="3"></textarea>
+    <div id="reject-actions">
+      <button type="button" id="reject-cancel">Cancel</button>
+      <button type="submit" id="reject-confirm">Reject</button>
+    </div>
+  </form>
 </div>
 <script src="boss.js"></script>
 <script type="importmap">
@@ -92,10 +106,9 @@ function setDoc(view, text) {
 
 const WS_URL = (location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host + "/ws";
 
-// Replies arrive one-per-query in send order, so a FIFO queue correlates each
-// socket frame with the loadCode() call that sent it.
+// A plain FIFO queue suffices: the server answers one frame per query, in receipt order.
 let socket = null;
-const pending = [];
+const pendingReplies = [];
 
 function bttMenu(show) {
   if (typeof trigger_action !== "function") return;
@@ -103,16 +116,15 @@ function bttMenu(show) {
     trigger_action({
       json: JSON.stringify({
         BTTPredefinedActionType: show ? 386 : 387,
-        BTTAdditionalActionData: '{"BTTMenuActionMenuID":"BOSS"}',
+        BTTAdditionalActionData: '{"BTTMenuActionMenuID":"BOSS", "BTTMenuActionActivateKeyboardFocus": 2}',
       }),
       wait_for_reply: true,
     });
   } catch (e) {
-    /* BTT bridge unavailable — ignore */
+    /* best-effort; swallow BTT bridge failures */
   }
 }
 
-// A new query arriving over the socket rings the menu; error frames aren't queries.
 function notifyNewQuery(text) {
   if (text.startsWith(";; error:")) return;
   bttMenu(true);
@@ -121,12 +133,12 @@ function notifyNewQuery(text) {
 function openSocket() {
   socket = new WebSocket(WS_URL);
   socket.addEventListener("message", (e) => {
-    const waiter = pending.shift();
+    const waiter = pendingReplies.shift();
     if (waiter) waiter.resolve(e.data);
     notifyNewQuery(e.data);
   });
   const fail = (reason) => {
-    while (pending.length) pending.shift().reject(reason);
+    while (pendingReplies.length) pendingReplies.shift().reject(reason);
     socket = null;
   };
   socket.addEventListener("close", () => fail(new Error("connection closed")));
@@ -139,19 +151,17 @@ function socketReady() {
     openSocket();
   if (socket.readyState === WebSocket.OPEN) return Promise.resolve();
   return new Promise((resolve, reject) => {
-    // Whichever of open/error fires first aborts the signal, detaching the other
-    // listener so it can't linger on the socket for the rest of its life.
-    const settled = new AbortController();
-    const finish = (done, value) => { settled.abort(); done(value); };
-    socket.addEventListener("open", () => finish(resolve), { signal: settled.signal });
+    // abort() detaches the losing listener so it can't linger on the socket.
+    const cleanup = new AbortController();
+    const finish = (done, value) => { cleanup.abort(); done(value); };
+    socket.addEventListener("open", () => finish(resolve), { signal: cleanup.signal });
     socket.addEventListener("error", () => finish(reject, new Error("connection error")),
-                            { signal: settled.signal });
+                            { signal: cleanup.signal });
   });
 }
 
-// Report replies are the query s-expression JSON-encoded as a string (mirrors
-// McPike's tryUnwrapJSONString on the HTTP path), and the frame may carry trailing
-// whitespace — so parse first, then keep the value only if it is a string.
+// The reply is the query JSON-encoded as a string, sometimes with trailing whitespace
+// (mirrors McPike's tryUnwrapJSONString) — so parse rather than strip quotes by hand.
 function unwrapQuery(text) {
   try {
     const parsed = JSON.parse(text);
@@ -167,8 +177,7 @@ async function loadCode(action = "refresh") {
   try {
     await socketReady();
     const reply = await new Promise((resolve, reject) => {
-      pending.push({ resolve, reject });
-      // The control action is itself a BOSS query against the monitoring engine.
+      pendingReplies.push({ resolve, reject });
       socket.send(`(EvaluateInEngines (List (Monitoring report)) ${action})`);
     });
     setDoc(queryView, unwrapQuery(reply));
@@ -190,11 +199,49 @@ createBOSS({
   setDoc(resultView, ";; failed to load: " + e);
 });
 
-for (const action of ["refresh", "approve", "reject"])
+const rejectOverlay = document.getElementById("reject-overlay");
+const rejectDialog = document.getElementById("reject-dialog");
+const rejectReason = document.getElementById("reject-reason");
+const rejectCancel = document.getElementById("reject-cancel");
+
+// Resolves to the reason string ("" if confirmed with none), or null if dismissed.
+function askRejectReason() {
+  return new Promise((resolve) => {
+    const cleanup = new AbortController();
+    const close = (result) => { cleanup.abort(); rejectOverlay.hidden = true; resolve(result); };
+    rejectDialog.addEventListener("submit", (e) => { e.preventDefault(); close(rejectReason.value.trim()); }, { signal: cleanup.signal });
+    rejectCancel.addEventListener("click", () => close(null), { signal: cleanup.signal });
+    rejectOverlay.addEventListener("click", (e) => { if (e.target === rejectOverlay) close(null); }, { signal: cleanup.signal });
+    rejectOverlay.addEventListener("keydown", (e) => {
+      // Don't let these reach the global handler: close() flips hidden mid-event,
+      // which would otherwise re-fire reject/approve and reopen the overlay.
+      if (e.key === "Escape") { e.stopPropagation(); close(null); }
+      else if (e.key === "Enter" && e.altKey) { e.preventDefault(); e.stopPropagation(); rejectDialog.requestSubmit(); }
+    }, { signal: cleanup.signal });
+    rejectReason.value = "";
+    rejectOverlay.hidden = false;
+    rejectReason.focus();
+  });
+}
+
+for (const action of ["refresh", "approve"])
   document.getElementById(action).addEventListener("click", () => {
     if (action !== "refresh") bttMenu(false);
     loadCode(action);
   });
+
+document.getElementById("reject").addEventListener("click", async () => {
+  const reason = await askRejectReason();
+  if (reason === null) return; // dismissed without rejecting
+  bttMenu(false);
+  loadCode(reason ? `(RejectedByUserWithReason ${JSON.stringify(reason)})` : "reject");
+});
+
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || !rejectOverlay.hidden) return;
+  if (e.ctrlKey) { e.preventDefault(); document.getElementById("approve").click(); }
+  else if (e.altKey) { e.preventDefault(); document.getElementById("reject").click(); }
+});
 document.getElementById("evaluate").addEventListener("click", () => {
   if (boss === null) return;
   const expr = queryView.state.doc.toString();
