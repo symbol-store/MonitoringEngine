@@ -172,7 +172,14 @@ function unwrapQuery(text) {
   return text;
 }
 
+// One report command in flight at a time: dropping re-entrant calls keeps each
+// approve/reject bound to the query currently previewed, so a double-fire can't
+// admit a parallel-submitted query the operator never reviewed.
+let reportInFlight = false;
+
 async function loadCode(action = "refresh") {
+  if (reportInFlight) return;
+  reportInFlight = true;
   setDoc(queryView, ";; loading\u2026");
   try {
     await socketReady();
@@ -183,6 +190,8 @@ async function loadCode(action = "refresh") {
     setDoc(queryView, unwrapQuery(reply));
   } catch (e) {
     setDoc(queryView, ";; failed to load via WebSocket\n;; " + e);
+  } finally {
+    reportInFlight = false;
   }
 }
 
