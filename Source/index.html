@@ -90,17 +90,90 @@ function setDoc(view, text) {
   view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
 }
 
-async function loadCode(suffix = "refresh") {
-  const SOURCE = "/EvaluateInEngines/List/Monitoring/:/report/////" + suffix;
-  setDoc(queryView, ";; loading…");
-  try {
+const WS_URL = (location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host + "/ws";
 
-  
-    const res = await fetch(SOURCE, { cache: "no-store" });
-    if (!res.ok) throw new Error(res.status + " " + res.statusText);
-    setDoc(queryView, await res.text());
+// Replies arrive one-per-query in send order, so a FIFO queue correlates each
+// socket frame with the loadCode() call that sent it.
+let socket = null;
+const pending = [];
+
+function bttMenu(show) {
+  if (typeof trigger_action !== "function") return;
+  try {
+    trigger_action({
+      json: JSON.stringify({
+        BTTPredefinedActionType: show ? 386 : 387,
+        BTTAdditionalActionData: '{"BTTMenuActionMenuID":"BOSS"}',
+      }),
+      wait_for_reply: true,
+    });
   } catch (e) {
-    setDoc(queryView, ";; failed to load " + SOURCE + "\n;; " + e);
+    /* BTT bridge unavailable — ignore */
+  }
+}
+
+// A new query arriving over the socket rings the menu; error frames aren't queries.
+function notifyNewQuery(text) {
+  if (text.startsWith(";; error:")) return;
+  bttMenu(true);
+}
+
+function openSocket() {
+  socket = new WebSocket(WS_URL);
+  socket.addEventListener("message", (e) => {
+    const waiter = pending.shift();
+    if (waiter) waiter.resolve(e.data);
+    notifyNewQuery(e.data);
+  });
+  const fail = (reason) => {
+    while (pending.length) pending.shift().reject(reason);
+    socket = null;
+  };
+  socket.addEventListener("close", () => fail(new Error("connection closed")));
+  socket.addEventListener("error", () => fail(new Error("connection error")));
+  return socket;
+}
+
+function socketReady() {
+  if (!socket || socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED)
+    openSocket();
+  if (socket.readyState === WebSocket.OPEN) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    // Whichever of open/error fires first aborts the signal, detaching the other
+    // listener so it can't linger on the socket for the rest of its life.
+    const settled = new AbortController();
+    const finish = (done, value) => { settled.abort(); done(value); };
+    socket.addEventListener("open", () => finish(resolve), { signal: settled.signal });
+    socket.addEventListener("error", () => finish(reject, new Error("connection error")),
+                            { signal: settled.signal });
+  });
+}
+
+// Report replies are the query s-expression JSON-encoded as a string (mirrors
+// McPike's tryUnwrapJSONString on the HTTP path), and the frame may carry trailing
+// whitespace — so parse first, then keep the value only if it is a string.
+function unwrapQuery(text) {
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed === "string") return parsed.replace(/\s+$/, "");
+  } catch (e) {
+    /* not a JSON string (e.g. an error frame) — show the frame as-is */
+  }
+  return text;
+}
+
+async function loadCode(action = "refresh") {
+  setDoc(queryView, ";; loading\u2026");
+  try {
+    await socketReady();
+    const reply = await new Promise((resolve, reject) => {
+      pending.push({ resolve, reject });
+      // The control action is itself a BOSS query against the monitoring engine.
+      socket.send(`(EvaluateInEngines (List (Monitoring report)) ${action})`);
+    });
+    setDoc(queryView, unwrapQuery(reply));
+  } catch (e) {
+    setDoc(queryView, ";; failed to load via WebSocket\n;; " + e);
   }
 }
 
@@ -118,7 +191,10 @@ createBOSS({
 });
 
 for (const action of ["refresh", "approve", "reject"])
-  document.getElementById(action).addEventListener("click", () => loadCode(action));
+  document.getElementById(action).addEventListener("click", () => {
+    if (action !== "refresh") bttMenu(false);
+    loadCode(action);
+  });
 document.getElementById("evaluate").addEventListener("click", () => {
   if (boss === null) return;
   const expr = queryView.state.doc.toString();
