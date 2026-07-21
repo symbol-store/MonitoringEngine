@@ -25,6 +25,8 @@ extern const unsigned char bossWasm[];
 extern const unsigned long bossWasm_len, bossWasm_rawlen;
 extern const unsigned char bossData[];
 extern const unsigned long bossData_len, bossData_rawlen;
+extern const unsigned char plotJs[];
+extern const unsigned long plotJs_len, plotJs_rawlen;
 
 namespace {
 std::vector<int8_t> inflateGz(unsigned char const* d, unsigned long n, unsigned long raw) {
@@ -53,6 +55,13 @@ std::vector<int8_t>& bossDataBytes() {
 std::string& bossJsText() {
   static auto text = [] {
     auto v = inflateGz(bossJs, bossJs_len, bossJs_rawlen);
+    return std::string(v.begin(), v.end());
+  }();
+  return text;
+}
+std::string& plotJsText() {
+  static auto text = [] {
+    auto v = inflateGz(plotJs, plotJs_len, plotJs_rawlen);
     return std::string(v.begin(), v.end());
   }();
   return text;
@@ -124,6 +133,8 @@ static Expression evaluate(Expression&& e) {
             return indexHtml; //
           } < "boss.js"_ >= [&](auto&&...) -> Expression {
             return bossJsText(); //
+          } < "plot.js"_ >= [&](auto&&...) -> Expression {
+            return plotJsText(); //
           } < "boss.wasm"_ >= [&](auto&&...) -> Expression {
             return binarySpan(bossWasmBytes()); //
           } < "boss.data"_ >= [&](auto&&...) -> Expression {

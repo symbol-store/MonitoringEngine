@@ -103,6 +103,23 @@ embed_file(indexHtml "${CMAKE_CURRENT_SOURCE_DIR}/Source/index.html" INDEX_HTML_
 embed_file(bossJs   "${BOSS_WASM_BUILD_DIR}/boss.js"   BOSS_JS_CPP   COMPRESS)
 embed_file(bossWasm "${BOSS_WASM_BUILD_DIR}/boss.wasm" BOSS_WASM_CPP COMPRESS)
 embed_file(bossData "${BOSS_WASM_BUILD_DIR}/boss.data" BOSS_DATA_CPP COMPRESS)
+# Fetch the most recent Observable Plot (and its d3 peer) at configure time and
+# embed the concatenated UMD bundle. Plot's UMD reads d3 off the global, so d3
+# must come first. Re-fetched on every reconfigure, so builds track upstream.
+set(PLOT_JS "${CMAKE_CURRENT_BINARY_DIR}/plot.js")
+file(DOWNLOAD "https://cdn.jsdelivr.net/npm/d3/dist/d3.min.js"
+     "${CMAKE_CURRENT_BINARY_DIR}/d3.min.js" STATUS _d3_status TLS_VERIFY ON)
+file(DOWNLOAD "https://cdn.jsdelivr.net/npm/@observablehq/plot/dist/plot.umd.min.js"
+     "${CMAKE_CURRENT_BINARY_DIR}/plot.umd.min.js" STATUS _plot_status TLS_VERIFY ON)
+list(GET _d3_status 0 _d3_rc)
+list(GET _plot_status 0 _plot_rc)
+if(_d3_rc OR _plot_rc)
+  message(FATAL_ERROR "Could not fetch Observable Plot bundle (d3: ${_d3_status}; plot: ${_plot_status})")
+endif()
+file(READ "${CMAKE_CURRENT_BINARY_DIR}/d3.min.js" _d3_js)
+file(READ "${CMAKE_CURRENT_BINARY_DIR}/plot.umd.min.js" _plot_js)
+file(WRITE "${PLOT_JS}" "// d3 + @observablehq/plot (fetched at build)\n${_d3_js}\n${_plot_js}")
+embed_file(plotJs "${PLOT_JS}" PLOT_JS_CPP COMPRESS)
 
 find_package(ZLIB REQUIRED)  # decompress the embedded artifacts at serve time
 add_library(MonitoringEngine ${LibraryType}
@@ -110,7 +127,8 @@ add_library(MonitoringEngine ${LibraryType}
   ${INDEX_HTML_CPP}
   ${BOSS_JS_CPP}
   ${BOSS_WASM_CPP}
-  ${BOSS_DATA_CPP})
+  ${BOSS_DATA_CPP}
+  ${PLOT_JS_CPP})
 
 set_property(TARGET MonitoringEngine PROPERTY CXX_STANDARD 23)
 if(MSVC)
