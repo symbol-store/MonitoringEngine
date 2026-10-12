@@ -9,12 +9,13 @@
   .synopsis-tooltip { padding: 4px 6px; }
   .synopsis-tooltip svg { display: block; max-width: 100%; height: auto; }
   .radial-menu { position: fixed; pointer-events: none; z-index: 1000; }
-  .radial-menu svg { overflow: visible; }
-  .radial-menu .wedge { fill: rgba(74, 128, 191, 0.12); stroke: #fff; stroke-width: 1; }
-  .radial-menu .wedge.populated { fill: rgba(74, 128, 191, 0.30); }
+  .radial-menu svg { overflow: visible; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.3)); }
+  .radial-menu .wedge { fill: #dbe6f4; stroke: #fff; stroke-width: 1.5; }
   .radial-menu .wedge.active { fill: #1a4d8f; }
+  .radial-menu .wedge.disabled { fill: #ececec; }
   .radial-menu text { font: 12px Helvetica, Arial, sans-serif; fill: #1a3a5c; text-anchor: middle; dominant-baseline: middle; }
   .radial-menu text.active { fill: #fff; }
+  .radial-menu text.disabled { fill: #9a9a9a; }
 </style>
 <button id="refresh">Refresh</button>
 <button id="approve">Approve</button>
@@ -30,6 +31,7 @@
     </div>
   </form>
 </div>
+<script src="boss.js"></script>
 <script src="plot.js"></script>
 <script type="importmap">
 {
@@ -51,7 +53,7 @@
 <script type="module">
 import { EditorView, hoverTooltip } from "@codemirror/view";
 import { EditorState } from "@codemirror/state";
-import { StreamLanguage, foldGutter, foldService, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
+import { StreamLanguage, foldGutter, foldService, codeFolding, foldEffect, foldedRanges, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { commonLisp } from "@codemirror/legacy-modes/mode/commonlisp";
 
 const lispFold = foldService.of((state, lineStart, lineEnd) => {
@@ -89,6 +91,7 @@ function makeEditor(parent, extra = []) {
       doc: "",
       extensions: [
         foldGutter({ openText: "▾", closedText: "▸" }),
+        codeFolding(),
         StreamLanguage.define(commonLisp),
         syntaxHighlighting(defaultHighlightStyle),
         lispFold,
@@ -126,48 +129,138 @@ const synopsisHover = hoverTooltip((view, pos) => {
 
 const queryView = makeEditor(document.getElementById("query"), [synopsisHover]);
 
+// Position-aware parse (character offsets), shared by folding and the radial menu.
+function parsePos(text) {
+  const n = text.length;
+  let i = 0;
+  const isSpace = (k) => { const c = text.charCodeAt(k); return c === 32 || (c >= 9 && c <= 13); };
+  const skip = () => { while (i < n && isSpace(i)) i++; };
+  function node() {
+    skip();
+    if (i >= n) return null;
+    if (text[i] === '(') {
+      const from = i; i++;
+      skip();
+      let headFrom = -1, headTo = -1, head = null;
+      if (i < n && text[i] !== '(' && text[i] !== ')') {
+        headFrom = i;
+        while (i < n && !isSpace(i) && text[i] !== '(' && text[i] !== ')') i++;
+        headTo = i; head = text.slice(headFrom, headTo);
+      }
+      const children = [];
+      for (;;) {
+        skip();
+        if (i >= n || text[i] === ')') { if (i < n) i++; break; }
+        const c = node();
+        if (!c) break;
+        children.push(c);
+      }
+      return { from, to: i, headFrom, headTo, head, children };
+    }
+    if (text[i] === ')') return null;
+    const from = i;
+    while (i < n && !isSpace(i) && text[i] !== '(' && text[i] !== ')') i++;
+    return { from, to: i, atom: true, children: [] };
+  }
+  return node();
+}
+
+// The list whose HEAD token covers `offset`, plus the head names enclosing it.
+function locate(tree, offset) {
+  let found = null;
+  (function walk(node, ancestors) {
+    if (!node || node.atom) return;
+    if (node.headFrom >= 0 && offset >= node.headFrom && offset <= node.headTo)
+      found = { node, ancestors: ancestors.slice() };
+    for (const c of node.children) walk(c, ancestors.concat(node));
+  })(tree, []);
+  if (!found) return null;
+  const heads = [found.node.head].concat(found.ancestors.map((a) => a.head)).filter(Boolean);
+  return { node: found.node, heads };
+}
+
+// Fold range for a list node: from its first newline to just past its close paren.
+function foldRangeOfNode(text, node) {
+  if (!node || node.atom) return null;
+  let nl = -1;
+  for (let k = node.from; k < node.to; k++) if (text.charCodeAt(k) === 10) { nl = k; break; }
+  return nl >= 0 ? { from: nl, to: node.to } : null;
+}
+
+// Multi-line, non-root lists with more than five arguments (the root is never folded).
+function foldRanges(text) {
+  const ranges = [];
+  (function walk(node, isRoot) {
+    if (!node || node.atom) return;
+    if (!isRoot && node.children.length > 5) {
+      const r = foldRangeOfNode(text, node);
+      if (r) ranges.push(r);
+    }
+    node.children.forEach((c) => walk(c, false));
+  })(parsePos(text), true);
+  return ranges;
+}
+
+// Tree-path helpers, used to preserve fold status across a wrap.
+const samePath = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+const startsWithPath = (q, p) => q.length > p.length && p.every((v, i) => v === q[i]);
+function nodeAtPath(tree, path) {
+  let n = tree;
+  for (const k of path) { if (!n || !n.children || !n.children[k]) return null; n = n.children[k]; }
+  return n;
+}
+function pathOfNode(tree, from, to) {
+  let res = null;
+  (function walk(node, path) {
+    if (!node || res) return;
+    if (!node.atom && node.from === from && node.to === to) { res = path; return; }
+    if (node.children) node.children.forEach((c, k) => walk(c, path.concat(k)));
+  })(tree, []);
+  return res;
+}
+function foldedPaths(tree, foldedTos) {
+  const paths = [];
+  (function walk(node, path) {
+    if (!node || node.atom) return;
+    if (foldedTos.has(node.to)) paths.push(path);
+    node.children.forEach((c, k) => walk(c, path.concat(k)));
+  })(tree, []);
+  return paths;
+}
+function currentFoldedTos(view) {
+  const tos = new Set();
+  const it = foldedRanges(view.state).iter();
+  while (it.value !== null) { tos.add(it.to); it.next(); }
+  return tos;
+}
+
+function applyAutoFold(view) {
+  const ranges = foldRanges(view.state.doc.toString());
+  if (ranges.length) view.dispatch({ effects: ranges.map((r) => foldEffect.of(r)) });
+}
+
 // --- Radial action menu: drag an expression head to wrap that expression ---
-// Directions, clockwise from East, matching ((round(atan2(dy,dx)/45)%8)+8)%8.
+// One wedge per action, splitting the circle evenly; the first wedge's centre
+// line faces North, the rest follow clockwise.
 function attachRadialMenu(view) {
-  const DIRS = ['E', 'SE', 'S', 'SW', 'W', 'NW', 'N', 'NE'];
-  const ACTIONS = { NE: 'Hide', S: 'Synopsize' };
+  const ACTIONS = ['Hide', 'Synopsize'];
+  const N = ACTIONS.length, SLICE = 360 / N;
   const OUTER = 84, INNER = 22;
   const NS = 'http://www.w3.org/2000/svg';
-  const isSpace = (ch) => { const c = ch.charCodeAt(0); return c === 32 || (c >= 9 && c <= 13); };
-  const isSym = (ch) => ch !== undefined && ch !== '(' && ch !== ')' && !isSpace(ch);
-
-  function headAt(text, pos) {
-    let a = pos, b = pos;
-    while (a > 0 && isSym(text[a - 1])) a--;
-    while (b < text.length && isSym(text[b])) b++;
-    if (a === b) return null;
-    let j = a - 1;
-    while (j >= 0 && isSpace(text[j])) j--;
-    if (j < 0 || text[j] !== '(') return null;
-    const open = j;
-    let depth = 0, close = -1, inStr = false;
-    for (let k = open; k < text.length; k++) {
-      const ch = text[k];
-      if (inStr) { if (ch === '\\') k++; else if (ch === '"') inStr = false; continue; }
-      if (ch === '"') inStr = true;
-      else if (ch === '(') depth++;
-      else if (ch === ')') { if (--depth === 0) { close = k; break; } }
-    }
-    if (close < 0) return null;
-    return { tokFrom: a, tokTo: b, open, close, name: text.slice(a, b) };
-  }
+  const centerDeg = (i) => -90 + i * SLICE;   // -90 deg = North (screen angle, y down)
 
   function wedgePath(cx, cy, r0, r1, a0, a1) {
     const rad = (a) => a * Math.PI / 180;
     const px = (r, a) => cx + r * Math.cos(rad(a));
     const py = (r, a) => cy + r * Math.sin(rad(a));
+    const large = (a1 - a0) > 180 ? 1 : 0;
     return 'M ' + px(r1, a0) + ' ' + py(r1, a0) +
-      ' A ' + r1 + ' ' + r1 + ' 0 0 1 ' + px(r1, a1) + ' ' + py(r1, a1) +
+      ' A ' + r1 + ' ' + r1 + ' 0 ' + large + ' 1 ' + px(r1, a1) + ' ' + py(r1, a1) +
       ' L ' + px(r0, a1) + ' ' + py(r0, a1) +
-      ' A ' + r0 + ' ' + r0 + ' 0 0 0 ' + px(r0, a0) + ' ' + py(r0, a0) + ' Z';
+      ' A ' + r0 + ' ' + r0 + ' 0 ' + large + ' 0 ' + px(r0, a0) + ' ' + py(r0, a0) + ' Z';
   }
 
-  function buildMenu(cx, cy) {
+  function buildMenu(cx, cy, disabled) {
     const size = OUTER * 2;
     const wrap = document.createElement('div');
     wrap.className = 'radial-menu';
@@ -178,72 +271,99 @@ function attachRadialMenu(view) {
     const svg = document.createElementNS(NS, 'svg');
     svg.setAttribute('width', size); svg.setAttribute('height', size);
     svg.setAttribute('viewBox', '0 0 ' + size + ' ' + size);
-    const wedges = [], labels = [];
-    for (let i = 0; i < 8; i++) {
+    const wedges = [], labels = [], actionable = [];
+    for (let i = 0; i < N; i++) {
+      const action = ACTIONS[i];
+      const off = disabled.has(action);
+      actionable[i] = !off;
+      const center = centerDeg(i);
       const path = document.createElementNS(NS, 'path');
-      path.setAttribute('d', wedgePath(OUTER, OUTER, INNER, OUTER, i * 45 - 22.5, i * 45 + 22.5));
-      const action = ACTIONS[DIRS[i]];
-      path.setAttribute('class', 'wedge' + (action ? ' populated' : ''));
+      path.setAttribute('d', wedgePath(OUTER, OUTER, INNER, OUTER, center - SLICE / 2, center + SLICE / 2));
+      path.setAttribute('class', 'wedge' + (off ? ' disabled' : ' populated'));
       svg.appendChild(path); wedges.push(path);
-      if (action) {
-        const r = (INNER + OUTER) / 2, ang = i * 45 * Math.PI / 180;
-        const label = document.createElementNS(NS, 'text');
-        label.setAttribute('x', OUTER + r * Math.cos(ang));
-        label.setAttribute('y', OUTER + r * Math.sin(ang));
-        label.textContent = action;
-        svg.appendChild(label); labels[i] = label;
-      }
+      const r = (INNER + OUTER) / 2, ang = center * Math.PI / 180;
+      const label = document.createElementNS(NS, 'text');
+      label.setAttribute('x', OUTER + r * Math.cos(ang));
+      label.setAttribute('y', OUTER + r * Math.sin(ang));
+      label.textContent = action;
+      if (off) label.setAttribute('class', 'disabled');
+      svg.appendChild(label); labels[i] = label;
     }
     wrap.appendChild(svg);
     document.body.appendChild(wrap);
     return {
       setActive(idx) {
-        for (let i = 0; i < 8; i++) {
-          const on = i === idx;
+        for (let i = 0; i < N; i++) {
+          const on = i === idx && actionable[i];
           wedges[i].classList.toggle('active', on);
-          if (labels[i]) labels[i].classList.toggle('active', on);
+          labels[i].classList.toggle('active', on);
         }
       },
+      actionAt(idx) { return actionable[idx] ? ACTIONS[idx] : null; },
       destroy() { wrap.remove(); },
     };
   }
 
-  function applyWrap(action, head) {
-    const text = view.state.doc.toString();
-    const from = head.open, to = head.close + 1;
-    const inner = text.slice(from, to);
-    view.dispatch({ changes: { from, to, insert: '(' + action + ' ' + inner + ')' } });
+  function applyWrap(action, node) {
+    if (!boss) return;
+    const oldText = view.state.doc.toString();
+    const wrapped = boss.wrap(oldText.slice(node.from, node.to), action);
+    if (wrapped.isError) { console.warn('wrap failed:', wrapped.text); return; }
+    // Capture fold status (by tree path) before the reprint shifts every position.
+    const oldTree = parsePos(oldText);
+    const target = pathOfNode(oldTree, node.from, node.to);
+    const oldFolded = foldedPaths(oldTree, currentFoldedTos(view));
+    view.dispatch({ changes: { from: node.from, to: node.to, insert: wrapped.text.trimEnd() } });
+    if (!target) return;
+    // The new wrapper is always unfolded; the wrapped expression (now one level
+    // deeper) and every other node keep their prior fold status.
+    const newText = view.state.doc.toString(), newTree = parsePos(newText);
+    const add = [];
+    for (const q of oldFolded) {
+      if (samePath(q, target)) add.push(target.concat(0));
+      else if (startsWithPath(q, target)) add.push(target.concat(0).concat(q.slice(target.length)));
+    }
+    const ranges = add.filter((p) => p.length > 0)
+      .map((p) => foldRangeOfNode(newText, nodeAtPath(newTree, p)))
+      .filter(Boolean);
+    if (ranges.length) view.dispatch({ effects: ranges.map((r) => foldEffect.of(r)) });
   }
 
   view.contentDOM.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
     if (pos == null) return;
-    const head = headAt(view.state.doc.toString(), pos);
-    if (!head) return;
+    const hit = locate(parsePos(view.state.doc.toString()), pos);
+    if (!hit) return;
     e.preventDefault();
-    const c1 = view.coordsAtPos(head.tokFrom), c2 = view.coordsAtPos(head.tokTo);
+    const node = hit.node;
+    const disabled = new Set(ACTIONS.filter((a) => hit.heads.includes(a)));
+    const c1 = view.coordsAtPos(node.headFrom), c2 = view.coordsAtPos(node.headTo);
     const cx = (c1.left + c2.right) / 2, cy = (c1.top + c2.bottom) / 2;
-    const menu = buildMenu(cx, cy);
+    const menu = buildMenu(cx, cy, disabled);
     let activeDir = -1;
     const onMove = (ev) => {
       const dx = ev.clientX - cx, dy = ev.clientY - cy;
       if (Math.hypot(dx, dy) < INNER) { activeDir = -1; menu.setActive(-1); return; }
-      activeDir = ((Math.round(Math.atan2(dy, dx) * 180 / Math.PI / 45) % 8) + 8) % 8;
+      const phi = ((Math.atan2(dy, dx) * 180 / Math.PI + 90) % 360 + 360) % 360;
+      activeDir = Math.round(phi / SLICE) % N;
       menu.setActive(activeDir);
     };
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      const action = activeDir >= 0 ? menu.actionAt(activeDir) : null;
       menu.destroy();
-      const action = activeDir >= 0 ? ACTIONS[DIRS[activeDir]] : null;
-      if (action) applyWrap(action, head);
+      if (action) applyWrap(action, node);
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
   });
 }
 attachRadialMenu(queryView);
+
+let boss = null;
+createBOSS({}).then((m) => { boss = m; }).catch((e) => { console.error("BOSS module failed to load:", e); });
 
 function setDoc(view, text) {
   view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
@@ -455,6 +575,7 @@ async function loadCode(action = "refresh") {
       socket.send(`(EvaluateInEngines (List (Monitoring report)) ${action})`);
     });
     setDoc(queryView, unwrapQuery(reply));
+    applyAutoFold(queryView);
   } catch (e) {
     setDoc(queryView, ";; failed to load via WebSocket\n;; " + e);
   } finally {
@@ -488,11 +609,14 @@ function askRejectReason() {
   });
 }
 
-for (const action of ["refresh", "approve"])
-  document.getElementById(action).addEventListener("click", () => {
-    if (action !== "refresh") bttMenu(false);
-    loadCode(action);
-  });
+document.getElementById("refresh").addEventListener("click", () => loadCode("refresh"));
+document.getElementById("approve").addEventListener("click", () => {
+  bttMenu(false);
+  if (!boss) return;
+  const wrapped = boss.wrap(queryView.state.doc.toString(), "Approve");
+  if (wrapped.isError) { console.warn("approve wrap failed:", wrapped.text); return; }
+  loadCode(wrapped.text.replace(/\s+$/, ""));
+});
 
 document.getElementById("reject").addEventListener("click", async () => {
   const reason = await askRejectReason();

@@ -7,6 +7,7 @@
 #include <deque>
 #include <fstream>
 #include <semaphore>
+#include <set>
 #include <sstream>
 #include <zlib.h>
 
@@ -66,6 +67,11 @@ std::string& plotJsText() {
   }();
   return text;
 }
+
+bool isExemptFromApproval(Symbol const& head) {
+  static auto const exemptHeads = std::set<std::string> {"GetEngineDescription"};
+  return exemptHeads.contains(head.getName());
+}
 } // namespace
 
 static Expression evaluate(Expression&& e) {
@@ -99,9 +105,8 @@ static Expression evaluate(Expression&& e) {
       return result;
     }
   } log;
-  return std::move(e) < "GetEntryPoint"_(Symbol_) >=
-             [](auto, auto dynamics,
-                auto) -> Expression {
+  return std::move(e) < "GetEntryPoint"_(Symbol_) >= [](auto, auto dynamics, auto)
+             -> Expression {
     static auto mode = std::get<Symbol>(dynamics[0]);
     return (long long)+[](BOSSExpression* e) -> BOSSExpression* {
       using ss = std::stringstream;
@@ -127,6 +132,12 @@ static Expression evaluate(Expression&& e) {
             expression.get() = "RejectedByUserWithReason"_(get<std::string>(dynamics[0]));
             blocked.get().release();
             return (ss() << boss::pretty << std::move(log.wait_and_front_expression().get())).str();
+          } < "Approve"_(Any_) >= [&](auto, auto dynamics, auto) -> Expression {
+            auto [expression, blocked] = log.wait_and_pop_front();
+            auto approved = (ss() << boss::pretty << dynamics[0]).str();
+            expression.get() = std::move(dynamics[0]);
+            blocked.get().release();
+            return approved;
           } < "refresh"_ >= [&](auto&&...) -> Expression {
             return (ss() << boss::pretty << std::move(log.wait_and_front_expression().get())).str();
           } < "index"_ >= [&](auto&&...) -> Expression {
@@ -164,19 +175,21 @@ static Expression evaluate(Expression&& e) {
           }));
     };
   } < Any_ >= boss::utilities::overload( //
-                             [&](Expression&& result) {
-                               std::binary_semaphore signal {0};
-                               log.emplace_back(result, signal);
-                               signal.acquire();
-                               return std::move(result);
-                             },
-                             [&](auto&&... args) {
-                               auto result = Expression(ComplexExpression(std::move(args)...));
-                               std::binary_semaphore signal {0};
-                               log.emplace_back(result, signal);
-                               signal.acquire();
-                               return std::move(result);
-                             }
+                    [&](Expression&& result) {
+                      std::binary_semaphore signal {0};
+                      log.emplace_back(result, signal);
+                      signal.acquire();
+                      return std::move(result);
+                    },
+                    [&](auto&&... args) {
+                      auto result = Expression(ComplexExpression(std::move(args)...));
+                      if(isExemptFromApproval(std::get<ComplexExpression>(result).getHead()))
+                        return result;
+                      std::binary_semaphore signal {0};
+                      log.emplace_back(result, signal);
+                      signal.acquire();
+                      return std::move(result);
+                    }
 
               );
 }

@@ -16,7 +16,7 @@ sexp initializeContextInModuleDir() {
 }
 
 struct WasmContext {
-  boss::BossContextGuard guard{initializeContextInModuleDir()};
+  boss::BossContextGuard guard {initializeContextInModuleDir()};
   sexp env = guard.ctx == nullptr ? nullptr : sexp_context_env(guard.ctx);
 };
 
@@ -33,6 +33,42 @@ boss::EvalResult evaluate(std::string const& expression, bool pretty) {
   return boss::evaluate_expression(context.guard.ctx, context.env, expression, pretty);
 }
 
+// Wrap an expression in (wrapper <expr>) without evaluating the payload:
+// read the datum, cons the wrapper head on, pretty-print via boss-print.
+boss::EvalResult wrap(std::string const& expression, std::string const& wrapper) {
+  WasmContext& context = sharedContext();
+  if(context.guard.ctx == nullptr) {
+    return {true, "failed to initialize BOSS chibi context"};
+  }
+  sexp ctx = context.guard.ctx;
+  sexp env = context.env;
+  auto const preprocessed = boss::preprocessUnicodeEscapes(expression);
+  sexp_gc_var6(port, inner, wrapped, print_proc, arg_list, result_str);
+  sexp_gc_preserve6(ctx, port, inner, wrapped, print_proc, arg_list, result_str);
+  port = sexp_open_input_string(ctx, sexp_c_string(ctx, preprocessed.c_str(), -1));
+  inner = sexp_read(ctx, port);
+  boss::EvalResult out {true, ""};
+  if(sexp_exceptionp(inner)) {
+    port = sexp_open_output_string(ctx);
+    sexp_print_exception(ctx, inner, port);
+    result_str = sexp_get_output_string(ctx, port);
+    out = {true, sexp_string_data(result_str)};
+  } else {
+    wrapped = sexp_cons(ctx, inner, SEXP_NULL);
+    wrapped = sexp_cons(ctx, sexp_intern(ctx, wrapper.c_str(), -1), wrapped);
+    print_proc = sexp_env_ref(ctx, env, sexp_intern(ctx, "boss-print", -1), SEXP_FALSE);
+    arg_list = sexp_list1(ctx, wrapped);
+    result_str = sexp_apply(ctx, print_proc, arg_list);
+    if(sexp_exceptionp(result_str) || !sexp_stringp(result_str)) {
+      out = {true, "failed to pretty-print wrapped expression"};
+    } else {
+      out = {false, sexp_string_data(result_str)};
+    }
+  }
+  sexp_gc_release6(ctx);
+  return out;
+}
+
 } // namespace
 
 EMSCRIPTEN_BINDINGS(boss) {
@@ -40,4 +76,5 @@ EMSCRIPTEN_BINDINGS(boss) {
       .field("isError", &boss::EvalResult::is_error)
       .field("text", &boss::EvalResult::text);
   emscripten::function("evaluate", &evaluate);
+  emscripten::function("wrap", &wrap);
 }
