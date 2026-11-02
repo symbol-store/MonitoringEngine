@@ -76,6 +76,7 @@ add_executable(boss
   "${BOSS_SOURCE_DIR}/Source/BOSS.cpp"
   "${BOSS_SOURCE_DIR}/Source/Serialization.cpp"
   "${BOSS_SOURCE_DIR}/Source/Shims/BossPrettyPrint.cpp"
+  "${BOSS_SOURCE_DIR}/Source/SchemeInitialization.cpp"
   "${GENERATED_FFI_BINDINGS}"
   "${CMAKE_CURRENT_SOURCE_DIR}/wasm-stubs.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/BOSSWasm.cpp")
