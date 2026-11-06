@@ -20,6 +20,14 @@
 <button id="refresh">Refresh</button>
 <button id="approve">Approve</button>
 <button id="reject">Reject</button>
+<select id="auto-approve" title="Approve every query automatically for a while">
+  <option value="0">Auto-approve: off</option>
+  <option value="1">Auto-approve: 1 min</option>
+  <option value="3">Auto-approve: 3 min</option>
+  <option value="5">Auto-approve: 5 min</option>
+  <option value="10">Auto-approve: 10 min</option>
+</select>
+<span id="auto-approve-status"></span>
 <div id="query"></div>
 <div id="reject-overlay" hidden>
   <form id="reject-dialog">
@@ -513,7 +521,7 @@ function bttMenu(show) {
 }
 
 function notifyNewQuery(text) {
-  if (text.startsWith(";; error:")) return;
+  if (text.startsWith(";; error:") || autoApproving()) return;
   bttMenu(true);
 }
 
@@ -618,6 +626,20 @@ function sendReportCommand(action, replyIsNextQuery) {
 // approve/reject bound to the query currently previewed, so a double-fire can't
 // admit a parallel-submitted query the operator never reviewed.
 let reportInFlight = false;
+let queryShown = false;
+
+const autoApproveSelect = document.getElementById("auto-approve");
+const autoApproveStatus = document.getElementById("auto-approve-status");
+let autoApproveUntil = 0;
+let autoApproveTimer = null;
+
+function autoApproving() { return Date.now() < autoApproveUntil; }
+
+function stopAutoApprove() {
+  autoApproveUntil = 0;
+  autoApproveSelect.value = "0";
+  autoApproveStatus.textContent = "";
+}
 
 // Every report command except Approve replies with the next pending query, and waits for
 // one when the queue is empty. Approve replies at once with the approved query.
@@ -625,6 +647,7 @@ let reportInFlight = false;
 async function loadCode(action = "refresh", replyIsNextQuery = true) {
   if (reportInFlight) return false;
   reportInFlight = true;
+  queryShown = false;
   setDoc(queryView, ";; waiting for next query");
   try {
     await socketReady();
@@ -636,6 +659,9 @@ async function loadCode(action = "refresh", replyIsNextQuery = true) {
     if (replyIsNextQuery) {
       setDoc(queryView, unwrapQuery(reply));
       applyAutoFold(queryView);
+      queryShown = true;
+      // Deferred: this loadCode call is still in flight and would drop the approval.
+      if (autoApproving()) setTimeout(approveShownQuery);
     }
     return true;
   } catch (e) {
@@ -673,12 +699,23 @@ function askRejectReason() {
 }
 
 document.getElementById("refresh").addEventListener("click", () => loadCode("refresh"));
-document.getElementById("approve").addEventListener("click", async () => {
+async function approveShownQuery() {
   bttMenu(false);
   if (!boss) return;
   const wrapped = boss.wrap(queryView.state.doc.toString(), "Approve");
   if (wrapped.isError) { console.warn("approve wrap failed:", wrapped.text); return; }
   if (await loadCode(wrapped.text.replace(/\s+$/, ""), false)) loadCode("refresh");
+}
+document.getElementById("approve").addEventListener("click", approveShownQuery);
+
+autoApproveSelect.addEventListener("change", () => {
+  clearTimeout(autoApproveTimer);
+  const minutes = Number(autoApproveSelect.value);
+  if (minutes === 0) { stopAutoApprove(); return; }
+  autoApproveUntil = Date.now() + minutes * 60000;
+  autoApproveTimer = setTimeout(stopAutoApprove, minutes * 60000);
+  autoApproveStatus.textContent = "until " + new Date(autoApproveUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (queryShown && !reportInFlight) approveShownQuery();
 });
 
 document.getElementById("reject").addEventListener("click", async () => {
