@@ -517,18 +517,66 @@ function notifyNewQuery(text) {
   bttMenu(true);
 }
 
+// McPike sends this frame to every WebSocket client before it exits.
+const SERVER_SHUTDOWN_NOTICE = "(ServerShuttingDown)";
+const SESSION_ENDED_NOTICE = "(ConnectionClosed)";
+
+// McPike keeps one monitor: it closes the older monitor's socket with this code, and the
+// older monitor stops reconnecting so that two monitors do not keep replacing each other.
+const REPLACED_BY_NEWER_SESSION = 4000;
+const REPLACED_NOTICE = ";; another monitor has taken over\n;; click Refresh to take over again";
+class MonitorReplaced extends Error {}
+// True once the current socket has sent connect. loadCode sends connect before the first
+// report command on each new socket, because McPike treats a socket as the monitor's only
+// after MonitoringEngine answers connect.
+let sessionStarted = false;
+
+// launchd starts McPike again on the next connection attempt, so the monitor retries
+// after a restart instead of waiting for someone to reload the page.
+const RECONNECT_DELAY_MS = { initial: 500, max: 30000 };
+let reconnectDelayMs = RECONNECT_DELAY_MS.initial;
+let reconnectTimer = null;
+
+function scheduleReconnect() {
+  if (reconnectTimer !== null) return;
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; loadCode("refresh"); }, reconnectDelayMs);
+  reconnectDelayMs = Math.min(reconnectDelayMs * 2, RECONNECT_DELAY_MS.max);
+}
+
 function openSocket() {
   socket = new WebSocket(WS_URL);
+  sessionStarted = false;
+  socket.addEventListener("open", () => { reconnectDelayMs = RECONNECT_DELAY_MS.initial; });
   socket.addEventListener("message", (e) => {
     const waiter = pendingReplies.shift();
+    if (e.data === SERVER_SHUTDOWN_NOTICE) {
+      if (waiter) waiter.reject(new Error("McPike has shut down"));
+      else setDoc(queryView, ";; McPike has shut down");
+      return;
+    }
+    // MonitoringEngine ends this monitor's wait when a newer monitor connects, just before
+    // McPike closes this socket.
+    if (e.data.trim() === SESSION_ENDED_NOTICE) {
+      if (waiter) waiter.reject(new MonitorReplaced(REPLACED_NOTICE));
+      return;
+    }
     if (waiter) waiter.resolve(e.data);
-    notifyNewQuery(e.data);
+    if (!waiter || waiter.replyIsNextQuery) notifyNewQuery(e.data);
   });
   const fail = (reason) => {
     while (pendingReplies.length) pendingReplies.shift().reject(reason);
     socket = null;
   };
-  socket.addEventListener("close", () => fail(new Error("connection closed")));
+  socket.addEventListener("close", (e) => {
+    if (e.code !== REPLACED_BY_NEWER_SESSION) {
+      fail(new Error("connection closed"));
+      scheduleReconnect();
+      return;
+    }
+    fail(new MonitorReplaced(REPLACED_NOTICE));
+    bttMenu(false);
+    setDoc(queryView, REPLACED_NOTICE);
+  });
   socket.addEventListener("error", () => fail(new Error("connection error")));
   return socket;
 }
@@ -559,25 +607,40 @@ function unwrapQuery(text) {
   return text;
 }
 
+function sendReportCommand(action, replyIsNextQuery) {
+  return new Promise((resolve, reject) => {
+    pendingReplies.push({ resolve, reject, replyIsNextQuery });
+    socket.send(`(EvaluateInEngines (List (Monitoring report)) ${action})`);
+  });
+}
+
 // One report command in flight at a time: dropping re-entrant calls keeps each
 // approve/reject bound to the query currently previewed, so a double-fire can't
 // admit a parallel-submitted query the operator never reviewed.
 let reportInFlight = false;
 
-async function loadCode(action = "refresh") {
-  if (reportInFlight) return;
+// Every report command except Approve replies with the next pending query, and waits for
+// one when the queue is empty. Approve replies at once with the approved query.
+// Resolves to true when the command was answered.
+async function loadCode(action = "refresh", replyIsNextQuery = true) {
+  if (reportInFlight) return false;
   reportInFlight = true;
-  setDoc(queryView, ";; loading\u2026");
+  setDoc(queryView, ";; waiting for next query");
   try {
     await socketReady();
-    const reply = await new Promise((resolve, reject) => {
-      pendingReplies.push({ resolve, reject });
-      socket.send(`(EvaluateInEngines (List (Monitoring report)) ${action})`);
-    });
-    setDoc(queryView, unwrapQuery(reply));
-    applyAutoFold(queryView);
+    if (!sessionStarted) {
+      await sendReportCommand("connect", false);
+      sessionStarted = true;
+    }
+    const reply = await sendReportCommand(action, replyIsNextQuery);
+    if (replyIsNextQuery) {
+      setDoc(queryView, unwrapQuery(reply));
+      applyAutoFold(queryView);
+    }
+    return true;
   } catch (e) {
-    setDoc(queryView, ";; failed to load via WebSocket\n;; " + e);
+    setDoc(queryView, e instanceof MonitorReplaced ? e.message : ";; failed to load via WebSocket\n;; " + e);
+    return false;
   } finally {
     reportInFlight = false;
   }
@@ -610,12 +673,12 @@ function askRejectReason() {
 }
 
 document.getElementById("refresh").addEventListener("click", () => loadCode("refresh"));
-document.getElementById("approve").addEventListener("click", () => {
+document.getElementById("approve").addEventListener("click", async () => {
   bttMenu(false);
   if (!boss) return;
   const wrapped = boss.wrap(queryView.state.doc.toString(), "Approve");
   if (wrapped.isError) { console.warn("approve wrap failed:", wrapped.text); return; }
-  loadCode(wrapped.text.replace(/\s+$/, ""));
+  if (await loadCode(wrapped.text.replace(/\s+$/, ""), false)) loadCode("refresh");
 });
 
 document.getElementById("reject").addEventListener("click", async () => {
