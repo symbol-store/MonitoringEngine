@@ -143,11 +143,11 @@ static Expression evaluate(Expression&& e) {
           } < "index"_ >= [&](auto&&...) -> Expression {
             return indexHtml; //
           } < "boss.js"_ >= [&](auto&&...) -> Expression {
-            return bossJsText(); //
+            return "ContentType"_("text/javascript", bossJsText()); //
           } < "plot.js"_ >= [&](auto&&...) -> Expression {
-            return plotJsText(); //
+            return "ContentType"_("text/javascript", plotJsText()); //
           } < "boss.wasm"_ >= [&](auto&&...) -> Expression {
-            return binarySpan(bossWasmBytes()); //
+            return "ContentType"_("application/wasm", binarySpan(bossWasmBytes())); //
           } < "boss.data"_ >= [&](auto&&...) -> Expression {
             return binarySpan(bossDataBytes()); //
           } < Symbol_ >= [](auto&&... args) -> Expression {
